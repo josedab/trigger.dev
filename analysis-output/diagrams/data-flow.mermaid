@@ -1,0 +1,111 @@
+%% Trigger.dev Data Flow: Task Trigger → Execution → Completion
+%% Analysis Commit: 19fa66931819371d607eff001b561aa783547734
+
+sequenceDiagram
+    participant User as Developer's App
+    participant SDK as @trigger.dev/sdk
+    participant API as Webapp API
+    participant DB as PostgreSQL
+    participant Queue as Redis Queue
+    participant Engine as RunEngine
+    participant Coord as Coordinator
+    participant Worker as Worker (Docker/K8s)
+    participant WS as WebSocket
+
+    Note over User,WS: Phase 1: Task Triggering
+
+    User->>SDK: await myTask.trigger(payload)
+    SDK->>API: POST /api/v1/tasks/my-task/trigger<br/>{payload, options}
+    API->>API: Validate API key & payload
+    API->>DB: Create TaskRun<br/>(status: PENDING)
+    DB-->>API: run_abc123
+    API->>Queue: ZADD queue run_abc123
+    API->>WS: Emit "run:created"
+    WS-->>User: Real-time notification
+    API-->>SDK: {id: "run_abc123", status: "PENDING"}
+    SDK-->>User: RunHandle
+
+    Note over User,WS: Phase 2: Dequeuing & Assignment
+
+    Engine->>Queue: ZRANGE queue 0 0 (get next run)
+    Queue-->>Engine: run_abc123
+    Engine->>Engine: Acquire lock (Redis SET NX)
+    Engine->>DB: Update status: PENDING → STARTED
+    Engine->>DB: Create TaskRunAttempt #1
+    Engine->>Coord: assignTask(run_abc123)
+    Coord->>Coord: Find available worker
+    Coord->>Worker: Execute task<br/>{runId, payload, context}
+    Engine->>WS: Emit "run:started"
+    WS-->>User: Real-time update
+
+    Note over User,WS: Phase 3: Execution (with Checkpoint)
+
+    Worker->>Worker: Start task execution
+    Worker->>DB: Update status: STARTED → EXECUTING
+    Worker->>WS: Stream logs
+    WS-->>User: Live log updates
+
+    Worker->>Worker: Execute step 1 (10 minutes)
+    Worker->>Worker: await ctx.checkpoint("step1")
+    Worker->>Coord: Request checkpoint
+    Coord->>Engine: saveCheckpoint("step1", state)
+    Engine->>DB: Create TaskRunCheckpoint<br/>{name: "step1", state: {...}}
+    Engine->>DB: Update status: EXECUTING → WAITING
+    Engine->>WS: Emit "run:checkpointed"
+    Worker->>Worker: Release resources
+
+    Note over User,WS: Phase 4: Resume from Checkpoint
+
+    Engine->>DB: Find runs in WAITING status
+    Engine->>DB: Get latest checkpoint
+    Engine->>Queue: Enqueue run_abc123 (resume)
+    Engine->>Coord: resumeTask(run_abc123, checkpoint)
+    Coord->>Worker: Resume execution<br/>{checkpointId, state}
+    Worker->>DB: Update status: WAITING → EXECUTING
+    Worker->>Worker: Restore state from checkpoint
+    Worker->>Worker: Execute step 2 (2 hours)
+    Worker->>Worker: await ctx.checkpoint("step2")
+    Coord->>Engine: saveCheckpoint("step2", state)
+
+    Note over User,WS: Phase 5: Completion
+
+    Worker->>Worker: Complete execution
+    Worker->>Coord: Report success<br/>{output: {...}}
+    Coord->>Engine: completeRun(run_abc123, output)
+    Engine->>DB: Update status: EXECUTING → COMPLETED_SUCCESSFULLY
+    Engine->>DB: Save output
+    Engine->>DB: Update TaskRunAttempt (success)
+    Engine->>WS: Emit "run:completed"
+    WS-->>User: Final notification
+    User->>SDK: await runs.retrieve(run_abc123)
+    SDK->>API: GET /api/v1/runs/run_abc123
+    API->>DB: SELECT * FROM TaskRun
+    DB-->>API: {status: "COMPLETED_SUCCESSFULLY", output: {...}}
+    API-->>SDK: RunResult
+    SDK-->>User: {ok: true, output: {...}}
+
+    Note over User,WS: Phase 6: Analytics & Observability
+
+    Engine->>DB: Write TaskEvent records
+    DB->>DB: Partition cleanup (pg_partman)
+    DB-->>Queue: Stream CDC events
+    Queue-->>CLICKHOUSE: Write analytics data
+
+    Note over User,WS: Optional: Error & Retry Flow
+
+    rect rgb(255, 200, 200)
+        Note over Worker,Engine: If task fails
+        Worker->>Coord: Report error<br/>{error: {...}}
+        Coord->>Engine: failRun(run_abc123, error)
+        Engine->>Engine: Check retry config
+        alt Attempts < maxAttempts
+            Engine->>Engine: Calculate backoff delay
+            Engine->>DB: Create TaskRunAttempt #2
+            Engine->>Queue: Re-enqueue (delayed)
+            Engine->>WS: Emit "run:retry"
+        else Max attempts reached
+            Engine->>DB: Update status: FAILED
+            Engine->>WS: Emit "run:failed"
+            Engine->>Engine: Trigger onFailure hooks
+        end
+    end

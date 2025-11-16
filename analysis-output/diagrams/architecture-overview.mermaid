@@ -1,0 +1,104 @@
+%% Trigger.dev System Architecture Overview
+%% Analysis Commit: 19fa66931819371d607eff001b561aa783547734
+
+graph TB
+    subgraph "User Layer"
+        USERCODE[Developer's Application<br/>TypeScript/JavaScript]
+        SDK[trigger.dev SDK<br/>@trigger.dev/sdk]
+        CLI[trigger.dev CLI<br/>Local Development]
+    end
+
+    subgraph "Platform - Control Plane"
+        WEBAPP[Webapp - Remix<br/>Port 3030]
+        API[REST API<br/>/api/v1/tasks/*]
+        WS[WebSocket Server<br/>Socket.io]
+        AUTH[Authentication<br/>GitHub OAuth / Magic Links]
+    end
+
+    subgraph "Platform - Execution Plane"
+        RUNENGINE[RunEngine<br/>Task Lifecycle Manager]
+        COORD[Coordinator<br/>Worker Orchestrator]
+        SUPERVISOR[Supervisor<br/>Health Monitor]
+        SCHEDULE[ScheduleEngine<br/>Cron Scheduler]
+    end
+
+    subgraph "Workers - Execution Environment"
+        DOCKER[Docker Provider<br/>Container Execution]
+        K8S[Kubernetes Provider<br/>Pod Execution]
+        WORKER1[Worker 1<br/>Task Executor]
+        WORKER2[Worker 2<br/>Task Executor]
+        WORKERN[Worker N<br/>Task Executor]
+    end
+
+    subgraph "Data Layer"
+        POSTGRES[(PostgreSQL<br/>Primary Datastore)]
+        REDIS[(Redis<br/>Queue + Cache)]
+        CLICKHOUSE[(ClickHouse<br/>Analytics)]
+        ELECTRIC[Electric SQL<br/>Sync Layer]
+    end
+
+    subgraph "Observability"
+        OTEL[OpenTelemetry<br/>Traces + Metrics]
+        SENTRY[Sentry<br/>Error Tracking]
+        POSTHOG[PostHog<br/>Product Analytics]
+    end
+
+    %% User interactions
+    USERCODE -->|Define Tasks| SDK
+    SDK -->|HTTP Requests| API
+    CLI -->|Local Dev| WEBAPP
+
+    %% Webapp interactions
+    WEBAPP --> API
+    WEBAPP --> WS
+    WEBAPP --> AUTH
+    API -->|Create TaskRun| POSTGRES
+    API -->|Enqueue| REDIS
+    WS -->|Real-time Updates| USERCODE
+
+    %% Execution flow
+    RUNENGINE -->|Dequeue| REDIS
+    RUNENGINE -->|Read/Write State| POSTGRES
+    RUNENGINE -->|Assign Tasks| COORD
+    COORD -->|Route to Provider| DOCKER
+    COORD -->|Route to Provider| K8S
+    DOCKER --> WORKER1
+    DOCKER --> WORKER2
+    K8S --> WORKERN
+    WORKER1 -->|Report Results| COORD
+    WORKER2 -->|Report Results| COORD
+    WORKERN -->|Report Results| COORD
+
+    %% Scheduler
+    SCHEDULE -->|Read Schedules| POSTGRES
+    SCHEDULE -->|Create Runs| RUNENGINE
+
+    %% Monitoring
+    SUPERVISOR -.->|Health Checks| WORKER1
+    SUPERVISOR -.->|Health Checks| WORKER2
+    SUPERVISOR -.->|Health Checks| WORKERN
+
+    %% Data flow
+    POSTGRES -->|Replicate Events| ELECTRIC
+    ELECTRIC -->|Sync to Frontend| WS
+    POSTGRES -->|Analytics Data| CLICKHOUSE
+
+    %% Observability
+    WEBAPP -->|Traces| OTEL
+    RUNENGINE -->|Traces| OTEL
+    COORD -->|Traces| OTEL
+    WORKER1 -->|Traces| OTEL
+    WEBAPP -->|Errors| SENTRY
+    WEBAPP -->|Analytics| POSTHOG
+
+    style USERCODE fill:#e1f5ff
+    style SDK fill:#a7d7f9
+    style WEBAPP fill:#ffd7a7
+    style RUNENGINE fill:#ffb3b3
+    style COORD fill:#ffb3b3
+    style WORKER1 fill:#d4f5d4
+    style WORKER2 fill:#d4f5d4
+    style WORKERN fill:#d4f5d4
+    style POSTGRES fill:#f9e5ff
+    style REDIS fill:#ffe5e5
+    style CLICKHOUSE fill:#fff5e5
