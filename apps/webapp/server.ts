@@ -11,6 +11,7 @@ import path from "path";
 import type { Server as IoServer } from "socket.io";
 import { WebSocketServer } from "ws";
 import { RateLimitMiddleware } from "~/services/apiRateLimit.server";
+import { PerEndpointRateLimitMiddleware } from "~/services/perEndpointRateLimit.server";
 import { type RunWithHttpContextFunction } from "~/services/httpAsyncStorage.server";
 import cluster from "node:cluster";
 import os from "node:os";
@@ -121,6 +122,7 @@ if (ENABLE_CLUSTER && cluster.isPrimary) {
     const wss: WebSocketServer | undefined = build.entry.module.wss;
     const apiRateLimiter: RateLimitMiddleware = build.entry.module.apiRateLimiter;
     const engineRateLimiter: RateLimitMiddleware = build.entry.module.engineRateLimiter;
+    const perEndpointApiRateLimiter: PerEndpointRateLimitMiddleware = build.entry.module.perEndpointApiRateLimiter;
     const runWithHttpContext: RunWithHttpContextFunction = build.entry.module.runWithHttpContext;
 
     app.use((req, res, next) => {
@@ -166,7 +168,13 @@ if (ENABLE_CLUSTER && cluster.isPrimary) {
         });
       }
 
-      app.use(apiRateLimiter);
+      // Use per-endpoint rate limiter if enabled, otherwise use the default API rate limiter
+      if (process.env.PER_ENDPOINT_RATE_LIMIT_ENABLED === "1") {
+        console.log("✅ Per-endpoint rate limiting enabled");
+        app.use(perEndpointApiRateLimiter);
+      } else {
+        app.use(apiRateLimiter);
+      }
       app.use(engineRateLimiter);
 
       app.all(

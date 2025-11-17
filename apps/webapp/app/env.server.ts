@@ -282,6 +282,9 @@ const EnvironmentSchema = z
     API_RATE_LIMIT_JWT_WINDOW: z.string().default("1m"),
     API_RATE_LIMIT_JWT_TOKENS: z.coerce.number().int().default(60),
 
+    // Per-endpoint rate limiting (RFC-0010)
+    PER_ENDPOINT_RATE_LIMIT_ENABLED: z.string().default("0"), // Set to "1" to enable per-endpoint rate limiting
+
     //v3
     PROVIDER_SECRET: z.string().default("provider-secret"),
     COORDINATOR_SECRET: z.string().default("coordinator-secret"),
