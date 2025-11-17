@@ -42,6 +42,11 @@ import { alertsWorker } from "~/v3/alertsWorker.server";
 import { generateFriendlyId } from "~/v3/friendlyIdentifiers";
 import { BaseService } from "../baseService.server";
 import { CURRENT_API_VERSION } from "~/api/versions";
+import {
+  createCircuitBreaker,
+  CircuitBreakerOpenError,
+} from "@trigger.dev/core/v3/circuitBreaker";
+import { meter } from "~/v3/tracer.server";
 
 type FoundAlert = Prisma.Result<
   typeof prisma.projectAlert,
@@ -87,6 +92,42 @@ type FoundAlert = Prisma.Result<
 >;
 
 class SkipRetryError extends Error {}
+
+// Create circuit breaker for webhook delivery
+const webhookCircuitBreaker = createCircuitBreaker({
+  func: async (options: {
+    url: string;
+    headers: Record<string, string>;
+    body: string;
+    timeout: number;
+  }) => {
+    const response = await fetch(options.url, {
+      method: "POST",
+      headers: options.headers,
+      body: options.body,
+      signal: AbortSignal.timeout(options.timeout),
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `Failed to send webhook: ${response.status} ${response.statusText}`
+      );
+    }
+
+    return response;
+  },
+  serviceName: "webhook-delivery",
+  meter,
+});
+
+// Create circuit breaker for Slack API
+const slackApiCircuitBreaker = createCircuitBreaker({
+  func: async <T>(operation: () => Promise<T>) => {
+    return await operation();
+  },
+  serviceName: "slack-api",
+  meter,
+});
 
 export class DeliverAlertService extends BaseService {
   public async call(alertId: string) {
@@ -914,24 +955,40 @@ export class DeliverAlertService extends BaseService {
     const signature = await subtle.sign("HMAC", key, hashPayload);
     const signatureHex = Buffer.from(signature).toString("hex");
 
-    // Send the webhook to the URL specified in webhook.url
-    const response = await fetch(webhook.url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-trigger-signature-hmacsha256": signatureHex,
-      },
-      body: rawPayload,
-      signal: AbortSignal.timeout(5000),
-    });
+    try {
+      // Send the webhook through circuit breaker
+      const response = await webhookCircuitBreaker.fire({
+        url: webhook.url,
+        headers: {
+          "content-type": "application/json",
+          "x-trigger-signature-hmacsha256": signatureHex,
+        },
+        body: rawPayload,
+        timeout: 10000, // 10s timeout (from config)
+      });
 
-    if (!response.ok) {
-      logger.info("[DeliverAlert] Failed to send alert webhook", {
+      logger.debug("[DeliverAlert] Successfully sent alert webhook", {
+        url: webhook.url,
         status: response.status,
-        statusText: response.statusText,
+      });
+    } catch (error) {
+      // Handle circuit breaker open error
+      if (error instanceof CircuitBreakerOpenError) {
+        logger.warn("[DeliverAlert] Circuit breaker open for webhook delivery", {
+          url: webhook.url,
+          serviceName: error.serviceName,
+        });
+
+        throw new Error(
+          `Webhook delivery circuit breaker is open (service unavailable): ${webhook.url}`
+        );
+      }
+
+      // Handle other errors
+      logger.info("[DeliverAlert] Failed to send alert webhook", {
+        error: error instanceof Error ? error.message : String(error),
         url: webhook.url,
         body: payload,
-        signature,
       });
 
       throw new Error(`Failed to send alert webhook to ${webhook.url}`);
@@ -948,65 +1005,79 @@ export class DeliverAlertService extends BaseService {
     );
 
     try {
-      return await client.chat.postMessage(message);
-    } catch (error) {
-      if (isWebAPIRateLimitedError(error)) {
-        logger.warn("[DeliverAlert] Slack rate limited", {
-          error,
-          message,
-        });
+      return await slackApiCircuitBreaker.fire(async () => {
+        try {
+          return await client.chat.postMessage(message);
+        } catch (error) {
+          if (isWebAPIRateLimitedError(error)) {
+            logger.warn("[DeliverAlert] Slack rate limited", {
+              error,
+              message,
+            });
 
-        throw new Error("Slack rate limited");
-      }
+            throw new Error("Slack rate limited");
+          }
 
-      if (isWebAPIHTTPError(error)) {
-        logger.warn("[DeliverAlert] Slack HTTP error", {
-          error,
-          message,
-        });
+          if (isWebAPIHTTPError(error)) {
+            logger.warn("[DeliverAlert] Slack HTTP error", {
+              error,
+              message,
+            });
 
-        throw new Error("Slack HTTP error");
-      }
+            throw new Error("Slack HTTP error");
+          }
 
-      if (isWebAPIRequestError(error)) {
-        logger.warn("[DeliverAlert] Slack request error", {
-          error,
-          message,
-        });
+          if (isWebAPIRequestError(error)) {
+            logger.warn("[DeliverAlert] Slack request error", {
+              error,
+              message,
+            });
 
-        throw new Error("Slack request error");
-      }
+            throw new Error("Slack request error");
+          }
 
-      if (isWebAPIPlatformError(error)) {
-        logger.warn("[DeliverAlert] Slack platform error", {
-          error,
-          message,
-        });
+          if (isWebAPIPlatformError(error)) {
+            logger.warn("[DeliverAlert] Slack platform error", {
+              error,
+              message,
+            });
 
-        if (error.data.error === "invalid_blocks") {
-          logger.error("[DeliverAlert] Slack invalid blocks", {
-            error,
-          });
+            if (error.data.error === "invalid_blocks") {
+              logger.error("[DeliverAlert] Slack invalid blocks", {
+                error,
+              });
 
-          throw new SkipRetryError("Slack invalid blocks");
-        }
+              throw new SkipRetryError("Slack invalid blocks");
+            }
 
-        if (error.data.error === "account_inactive") {
-          logger.info("[DeliverAlert] Slack account inactive, skipping retry", {
+            if (error.data.error === "account_inactive") {
+              logger.info("[DeliverAlert] Slack account inactive, skipping retry", {
+                error,
+                message,
+              });
+
+              throw new SkipRetryError("Slack account inactive");
+            }
+
+            throw new Error("Slack platform error");
+          }
+
+          logger.warn("[DeliverAlert] Failed to send slack message", {
             error,
             message,
           });
 
-          throw new SkipRetryError("Slack account inactive");
+          throw error;
         }
-
-        throw new Error("Slack platform error");
-      }
-
-      logger.warn("[DeliverAlert] Failed to send slack message", {
-        error,
-        message,
       });
+    } catch (error) {
+      if (error instanceof CircuitBreakerOpenError) {
+        logger.warn("[DeliverAlert] Slack API circuit breaker open", {
+          serviceName: error.serviceName,
+        });
+
+        throw new Error("Slack API is currently unavailable. Please try again later.");
+      }
 
       throw error;
     }

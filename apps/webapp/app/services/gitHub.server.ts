@@ -3,6 +3,8 @@ import { env } from "../env.server";
 import { prisma } from "~/db.server";
 import { logger } from "./logger.server";
 import { errAsync, fromPromise, okAsync, type ResultAsync } from "neverthrow";
+import { createCircuitBreaker, CircuitBreakerOpenError } from "@trigger.dev/core/v3/circuitBreaker";
+import { meter } from "~/v3/tracer.server";
 
 export const githubApp =
   env.GITHUB_APP_ENABLED === "1"
@@ -15,6 +17,16 @@ export const githubApp =
       })
     : null;
 
+// Circuit breaker for GitHub API calls
+// Provides an additional layer of protection beyond Octokit's built-in retry logic
+const githubApiCircuitBreaker = createCircuitBreaker({
+  func: async <T>(operation: () => Promise<T>) => {
+    return await operation();
+  },
+  serviceName: "github-api",
+  meter,
+});
+
 /**
  * Links a GitHub App installation to a Trigger organization
  */
@@ -26,79 +38,105 @@ export async function linkGitHubAppInstallation(
     throw new Error("GitHub App is not enabled");
   }
 
-  const octokit = await githubApp.getInstallationOctokit(installationId);
-  const { data: installation } = await octokit.rest.apps.getInstallation({
-    installation_id: installationId,
-  });
+  try {
+    await githubApiCircuitBreaker.fire(async () => {
+      const octokit = await githubApp.getInstallationOctokit(installationId);
+      const { data: installation } = await octokit.rest.apps.getInstallation({
+        installation_id: installationId,
+      });
 
-  const repositories = await fetchInstallationRepositories(octokit, installationId);
+      const repositories = await fetchInstallationRepositories(octokit, installationId);
 
-  const repositorySelection = installation.repository_selection === "all" ? "ALL" : "SELECTED";
+      const repositorySelection = installation.repository_selection === "all" ? "ALL" : "SELECTED";
 
-  await prisma.githubAppInstallation.create({
-    data: {
-      appInstallationId: installationId,
-      organizationId,
-      targetId: installation.target_id,
-      targetType: installation.target_type,
-      accountHandle: installation.account
-        ? "login" in installation.account
-          ? installation.account.login
-          : "slug" in installation.account
-          ? installation.account.slug
-          : "-"
-        : "-",
-      permissions: installation.permissions,
-      repositorySelection,
-      repositories: {
-        create: repositories,
-      },
-    },
-  });
+      await prisma.githubAppInstallation.create({
+        data: {
+          appInstallationId: installationId,
+          organizationId,
+          targetId: installation.target_id,
+          targetType: installation.target_type,
+          accountHandle: installation.account
+            ? "login" in installation.account
+              ? installation.account.login
+              : "slug" in installation.account
+              ? installation.account.slug
+              : "-"
+            : "-",
+          permissions: installation.permissions,
+          repositorySelection,
+          repositories: {
+            create: repositories,
+          },
+        },
+      });
+    });
+  } catch (error) {
+    if (error instanceof CircuitBreakerOpenError) {
+      logger.warn("GitHub API circuit breaker open", {
+        operation: "linkGitHubAppInstallation",
+        installationId,
+      });
+      throw new Error("GitHub API is currently unavailable. Please try again later.");
+    }
+    throw error;
+  }
 }
 
 /**
- * Links a GitHub App installation to a Trigger organization
+ * Updates a GitHub App installation
  */
 export async function updateGitHubAppInstallation(installationId: number): Promise<void> {
   if (!githubApp) {
     throw new Error("GitHub App is not enabled");
   }
 
-  const octokit = await githubApp.getInstallationOctokit(installationId);
-  const { data: installation } = await octokit.rest.apps.getInstallation({
-    installation_id: installationId,
-  });
+  try {
+    await githubApiCircuitBreaker.fire(async () => {
+      const octokit = await githubApp.getInstallationOctokit(installationId);
+      const { data: installation } = await octokit.rest.apps.getInstallation({
+        installation_id: installationId,
+      });
 
-  const existingInstallation = await prisma.githubAppInstallation.findFirst({
-    where: { appInstallationId: installationId },
-  });
+      const existingInstallation = await prisma.githubAppInstallation.findFirst({
+        where: { appInstallationId: installationId },
+      });
 
-  if (!existingInstallation) {
-    throw new Error("GitHub App installation not found");
+      if (!existingInstallation) {
+        throw new Error("GitHub App installation not found");
+      }
+
+      const repositorySelection = installation.repository_selection === "all" ? "ALL" : "SELECTED";
+
+      // repos are updated asynchronously via webhook events
+      await prisma.githubAppInstallation.update({
+        where: { id: existingInstallation?.id },
+        data: {
+          appInstallationId: installationId,
+          targetId: installation.target_id,
+          targetType: installation.target_type,
+          accountHandle: installation.account
+            ? "login" in installation.account
+              ? installation.account.login
+              : "slug" in installation.account
+              ? installation.account.slug
+              : "-"
+            : "-",
+          permissions: installation.permissions,
+          suspendedAt: existingInstallation?.suspendedAt,
+          repositorySelection,
+        },
+      });
+    });
+  } catch (error) {
+    if (error instanceof CircuitBreakerOpenError) {
+      logger.warn("GitHub API circuit breaker open", {
+        operation: "updateGitHubAppInstallation",
+        installationId,
+      });
+      throw new Error("GitHub API is currently unavailable. Please try again later.");
+    }
+    throw error;
   }
-
-  const repositorySelection = installation.repository_selection === "all" ? "ALL" : "SELECTED";
-
-  // repos are updated asynchronously via webhook events
-  await prisma.githubAppInstallation.update({
-    where: { id: existingInstallation?.id },
-    data: {
-      appInstallationId: installationId,
-      targetId: installation.target_id,
-      targetType: installation.target_type,
-      accountHandle: installation.account
-        ? "login" in installation.account
-          ? installation.account.login
-          : "slug" in installation.account
-          ? installation.account.slug
-          : "-"
-        : "-",
-      permissions: installation.permissions,
-      suspendedAt: existingInstallation?.suspendedAt,
-      repositorySelection,
-    },
-  });
 }
 
 async function fetchInstallationRepositories(octokit: Octokit, installationId: number) {
@@ -142,7 +180,7 @@ export function checkGitHubBranchExists(
   installationId: number,
   fullRepoName: string,
   branch: string
-): ResultAsync<boolean, { type: "other" | "github_app_not_enabled"; cause?: unknown }> {
+): ResultAsync<boolean, { type: "other" | "github_app_not_enabled" | "circuit_breaker_open"; cause?: unknown }> {
   if (!githubApp) {
     return errAsync({ type: "github_app_not_enabled" as const });
   }
@@ -153,27 +191,37 @@ export function checkGitHubBranchExists(
 
   const [owner, repo] = fullRepoName.split("/");
 
-  const getOctokit = () =>
-    fromPromise(githubApp.getInstallationOctokit(installationId), (error) => ({
-      type: "other" as const,
-      cause: error,
-    }));
-
-  const getBranch = (octokit: Octokit) =>
+  const checkBranchWithCircuitBreaker = () =>
     fromPromise(
-      octokit.rest.repos.getBranch({
-        owner,
-        repo,
-        branch,
+      githubApiCircuitBreaker.fire(async () => {
+        const octokit = await githubApp.getInstallationOctokit(installationId);
+        return await octokit.rest.repos.getBranch({
+          owner,
+          repo,
+          branch,
+        });
       }),
-      (error) => ({
-        type: "other" as const,
-        cause: error,
-      })
+      (error) => {
+        if (error instanceof CircuitBreakerOpenError) {
+          logger.warn("GitHub API circuit breaker open", {
+            operation: "checkGitHubBranchExists",
+            installationId,
+            fullRepoName,
+            branch,
+          });
+          return {
+            type: "circuit_breaker_open" as const,
+            cause: error,
+          };
+        }
+        return {
+          type: "other" as const,
+          cause: error,
+        };
+      }
     );
 
-  return getOctokit()
-    .andThen((octokit) => getBranch(octokit))
+  return checkBranchWithCircuitBreaker()
     .map(() => true)
     .orElse((error) => {
       if (
