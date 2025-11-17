@@ -12,6 +12,17 @@ import { links } from "./links.js";
 import { ExceptionEventProperties } from "./schemas/openTelemetry.js";
 import { assertExhaustive } from "../utils.js";
 
+// Re-export enhanced errors for convenience (RFC-0006)
+export {
+  EnhancedTaskError,
+  type ErrorContext,
+  type SerializedEnhancedError,
+  isEnhancedError,
+  enhanceError,
+  toTaskRunError,
+  collectErrorContext,
+} from "./enhancedErrors.js";
+
 /**
  * If you throw this, it will get converted into an INTERNAL_ERROR
  */
