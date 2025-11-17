@@ -31,6 +31,9 @@
     "noUncheckedIndexedAccess": true,
 
     "pretty": true,
-    "customConditions": ["@triggerdotdev/source"]
+    "customConditions": ["@triggerdotdev/source"],
+
+    "incremental": true,
+    "tsBuildInfoFile": ".tsbuildinfo"
   }
 }
