@@ -3,7 +3,7 @@ import { json } from "@remix-run/server-runtime";
 import { CreateScheduleOptions, ScheduleObject } from "@trigger.dev/core/v3";
 import { z } from "zod";
 import { ScheduleListPresenter } from "~/presenters/v3/ScheduleListPresenter.server";
-import { authenticateApiRequest } from "~/services/apiAuth.server";
+import { requireAuth } from "~/middleware/auth";
 import { UpsertSchedule } from "~/v3/schedules";
 import { ServiceValidationError } from "~/v3/services/baseService.server";
 import { UpsertTaskScheduleService } from "~/v3/services/upsertTaskSchedule.server";
@@ -19,13 +19,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return { status: 405, body: "Method Not Allowed" };
   }
 
-  // Authenticate the request
-  const authenticationResult = await authenticateApiRequest(request);
-
-  if (!authenticationResult) {
-    return json({ error: "Invalid or Missing API Key" }, { status: 401 });
-  }
-
+  const authenticationResult = await requireAuth(request);
   const rawBody = await request.json();
 
   const body = CreateScheduleOptions.safeParse(rawBody);
@@ -79,13 +73,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  // Authenticate the request
-  const authenticationResult = await authenticateApiRequest(request);
-
-  if (!authenticationResult) {
-    return json({ error: "Invalid or Missing API Key" }, { status: 401 });
-  }
-
+  const authenticationResult = await requireAuth(request);
   const rawSearchParams = new URL(request.url).searchParams;
   const params = SearchParamsSchema.safeParse(Object.fromEntries(rawSearchParams.entries()));
 

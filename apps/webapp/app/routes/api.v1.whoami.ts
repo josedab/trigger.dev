@@ -1,15 +1,10 @@
 import type { LoaderFunctionArgs } from "@remix-run/server-runtime";
 import { json } from "@remix-run/server-runtime";
 import { prisma } from "~/db.server";
-import { authenticateApiRequest } from "~/services/apiAuth.server";
+import { requireAuth } from "~/middleware/auth";
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  // Next authenticate the request
-  const authenticationResult = await authenticateApiRequest(request);
-
-  if (!authenticationResult) {
-    return json({ error: "Invalid or Missing API key" }, { status: 401 });
-  }
+  const authenticationResult = await requireAuth(request);
 
   const environmentWithUser = await prisma.runtimeEnvironment.findUnique({
     select: {

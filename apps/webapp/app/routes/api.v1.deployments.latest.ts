@@ -1,18 +1,10 @@
 import { LoaderFunctionArgs, json } from "@remix-run/server-runtime";
 import { WorkerInstanceGroupType } from "@trigger.dev/database";
 import { prisma } from "~/db.server";
-import { authenticateApiRequest } from "~/services/apiAuth.server";
-import { logger } from "~/services/logger.server";
+import { requireAuth } from "~/middleware/auth";
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  // Next authenticate the request
-  const authenticationResult = await authenticateApiRequest(request);
-
-  if (!authenticationResult) {
-    logger.info("Invalid or missing api key", { url: request.url });
-    return json({ error: "Invalid or Missing API key" }, { status: 401 });
-  }
-
+  const authenticationResult = await requireAuth(request);
   const authenticatedEnv = authenticationResult.environment;
 
   const deployment = await prisma.workerDeployment.findFirst({
