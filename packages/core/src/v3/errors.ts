@@ -47,6 +47,181 @@ export function isInternalError(error: unknown): error is InternalError {
   return error instanceof Error && error.name === "TriggerInternalError";
 }
 
+/**
+ * Enhanced error class with rich execution context for better debugging
+ * Includes run ID, attempt number, checkpoint state, and trace information
+ */
+export class TaskError extends Error {
+  public readonly context: TaskErrorContext;
+
+  constructor(message: string, context: TaskErrorContext) {
+    super(message);
+    this.name = "TaskError";
+    this.context = context;
+  }
+
+  toString(): string {
+    const contextLines = [
+      `TaskError: ${this.message}`,
+      "",
+      "Context:",
+      `  Run ID: ${this.context.runId}`,
+      `  Task ID: ${this.context.taskId}`,
+      `  Attempt: #${this.context.attemptNumber}`,
+    ];
+
+    if (this.context.checkpointName) {
+      contextLines.push(`  Checkpoint: ${this.context.checkpointName}`);
+    }
+
+    contextLines.push(`  Environment: ${this.context.environment}`);
+
+    if (this.context.traceId) {
+      contextLines.push(`  Trace ID: ${this.context.traceId}`);
+    }
+
+    if (this.context.spanId) {
+      contextLines.push(`  Span ID: ${this.context.spanId}`);
+    }
+
+    if (this.context.userId) {
+      contextLines.push(`  User ID: ${this.context.userId}`);
+    }
+
+    // Add helpful links if we have the necessary context
+    if (this.context.organizationSlug && this.context.projectRef) {
+      contextLines.push("");
+      contextLines.push(
+        `View run: /orgs/${this.context.organizationSlug}/projects/${this.context.projectRef}/runs/${this.context.runId}`
+      );
+    }
+
+    if (this.stack) {
+      contextLines.push("");
+      contextLines.push("Stack:");
+      contextLines.push(this.stack);
+    }
+
+    return contextLines.join("\n");
+  }
+}
+
+export type TaskErrorContext = {
+  runId: string;
+  taskId: string;
+  attemptNumber: number;
+  environment: string;
+  checkpointName?: string;
+  traceId?: string;
+  spanId?: string;
+  userId?: string;
+  organizationSlug?: string;
+  projectRef?: string;
+};
+
+export function isTaskError(error: unknown): error is TaskError {
+  return error instanceof Error && error.name === "TaskError";
+}
+
+/**
+ * Serializes any error into a plain object that can be sent across process boundaries
+ * Preserves all error properties including custom ones
+ */
+export function serializeError(error: Error): SerializedErrorData {
+  const serialized: SerializedErrorData = {
+    name: error.name,
+    message: error.message,
+    stack: error.stack,
+  };
+
+  // Preserve custom properties from TaskError and other error types
+  if (isTaskError(error)) {
+    serialized.context = error.context;
+  }
+
+  // Capture any other custom properties
+  const customProps = Object.getOwnPropertyNames(error).reduce(
+    (acc, key) => {
+      if (key !== "name" && key !== "message" && key !== "stack" && key !== "context") {
+        acc[key] = (error as any)[key];
+      }
+      return acc;
+    },
+    {} as Record<string, any>
+  );
+
+  if (Object.keys(customProps).length > 0) {
+    serialized.customProperties = customProps;
+  }
+
+  return serialized;
+}
+
+/**
+ * Deserializes an error object back into an Error instance
+ * Restores custom properties and error type
+ */
+export function deserializeError(data: SerializedErrorData): Error {
+  let error: Error;
+
+  // Recreate TaskError if it has context
+  if (data.context) {
+    error = new TaskError(data.message, data.context);
+  } else {
+    error = new Error(data.message);
+  }
+
+  error.name = data.name;
+  if (data.stack) {
+    error.stack = data.stack;
+  }
+
+  // Restore custom properties
+  if (data.customProperties) {
+    Object.assign(error, data.customProperties);
+  }
+
+  return error;
+}
+
+export type SerializedErrorData = {
+  name: string;
+  message: string;
+  stack?: string;
+  context?: TaskErrorContext;
+  customProperties?: Record<string, any>;
+};
+
+/**
+ * Helper to create a TaskErrorContext from the current task execution context
+ * Can be used with TaskContextAPI to get the current context
+ */
+export function createTaskErrorContext(params: {
+  runId: string;
+  taskId: string;
+  attemptNumber: number;
+  environment: string;
+  checkpointName?: string;
+  traceId?: string;
+  spanId?: string;
+  userId?: string;
+  organizationSlug?: string;
+  projectRef?: string;
+}): TaskErrorContext {
+  return {
+    runId: params.runId,
+    taskId: params.taskId,
+    attemptNumber: params.attemptNumber,
+    environment: params.environment,
+    checkpointName: params.checkpointName,
+    traceId: params.traceId,
+    spanId: params.spanId,
+    userId: params.userId,
+    organizationSlug: params.organizationSlug,
+    projectRef: params.projectRef,
+  };
+}
+
 export class AbortTaskRunError extends Error {
   constructor(message: string) {
     super(message);
