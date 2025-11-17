@@ -252,6 +252,45 @@ You will be prompted to select which packages to include in the changeset. Only 
 
 Most of the time the changes you'll make are likely to be categorized as patch releases. If you feel like there is the need for a minor or major release of the package based on the changes being made, add the changeset as such and it will be discussed during PR review.
 
+## Architectural Decision Records (ADRs)
+
+We use Architectural Decision Records (ADRs) to document important architectural decisions, their context, alternatives considered, and consequences. ADRs help us preserve institutional knowledge and make it easier for new contributors to understand why certain decisions were made.
+
+### When to write an ADR
+
+Create an ADR for decisions that are:
+
+- **Hard to reverse**: Changes that would require significant effort to undo
+- **Architecturally significant**: Affect multiple components or the overall system structure
+- **Have significant trade-offs**: Decisions where alternatives have meaningful pros and cons
+- **Need context preservation**: Decisions that will be questioned by future team members
+
+Examples include:
+- Choice of database technology
+- Selection of frameworks or libraries
+- System architecture patterns
+- Major API design decisions
+
+### How to create an ADR
+
+1. Copy the template from `docs/adr/ADR-template.md`
+2. Name it `ADR-XXXX-brief-title.md` using the next available number
+3. Fill in all sections:
+   - **Context**: Why is this decision needed? What factors are at play?
+   - **Decision**: What did we decide? Be specific and concrete.
+   - **Alternatives Considered**: What other options were evaluated and why were they rejected?
+   - **Consequences**: What are the positive, negative, and neutral impacts?
+4. Submit a PR with the ADR for team review
+5. After approval, update `docs/adr/README.md` with the new ADR in the index
+
+### ADR approval process
+
+- ADRs should be reviewed by the tech lead and at least one senior engineer
+- Discussion and iteration on the ADR is encouraged before approval
+- Once approved and merged, the ADR becomes part of our architectural documentation
+
+For more information, see the [ADR documentation](docs/adr/README.md).
+
 ## Troubleshooting
 
 ### EADDRINUSE: address already in use :::3030
